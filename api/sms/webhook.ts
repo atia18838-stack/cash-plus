@@ -2,39 +2,42 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../convex/_generated/api.js';
 
-// تهيئة الاتصال بقاعدة بيانات Convex
 const convex = new ConvexHttpClient(
   process.env.VITE_CONVEX_URL || process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL!
 );
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // قبول طلبات POST فقط
   if (req.method !== 'POST') {
     return res.status(405).json({ success: false, message: 'Method Not Allowed' });
   }
 
   try {
     const body = req.body || {};
+    
+    // 🔥 طباعة الـ Body بالكامل في الـ Logs للرؤية التحليلية
+    console.log("RECEIVED PAYLOAD:", JSON.stringify(body));
 
-    // استخراج بيانات الرسالة والموبايل
-    const sender = body.sender || body.from || 'VF-Cash';
-    const message = body.message || body.text || body.content || '';
+    const sender = body.sender || body.from || body.address || 'VF-Cash';
+    const message = body.message || body.text || body.content || body.sms || '';
     const phone = body.phone || body.sim || '01009149586';
 
+    console.log("PARSED VALUES -> Sender:", sender, "| Phone:", phone, "| Message:", message);
+
     if (!message) {
-      return res.status(400).json({ success: false, message: 'محتوى الرسالة مطلوب' });
+      return res.status(400).json({ success: false, message: 'محتوى الرسالة فارغ' });
     }
 
-    // استدعاء Mutation للـ Convex لتفكيك الرسالة وتسجيل العملية وتحديث الرصيد
     const result = await convex.mutation(api.webhook.parseAndProcessSms, {
       sender,
       phone,
       body: message,
     });
 
+    console.log("CONVEX RESULT:", JSON.stringify(result));
+
     return res.status(200).json({
       success: true,
-      message: 'تم استقبال الرسالة وتحديث البيانات بنجاح!',
+      message: 'تم استقبال الرسالة',
       data: result,
     });
 
