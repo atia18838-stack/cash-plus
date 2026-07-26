@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { ConvexHttpClient } from 'convex/browser';
-import { api } from '../../convex/_generated/api';
+import { api } from '../../convex/_generated/api.js';
 
 // تهيئة الاتصال بقاعدة بيانات Convex
 const convex = new ConvexHttpClient(
