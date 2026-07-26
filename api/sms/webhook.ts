@@ -1,83 +1,49 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { ConvexHttpClient } from 'convex/browser';
+import { api } from '../../convex/_generated/api';
+
+// تهيئة الاتصال بقاعدة بيانات Convex
+const convex = new ConvexHttpClient(
+  process.env.VITE_CONVEX_URL || process.env.CONVEX_URL || process.env.NEXT_PUBLIC_CONVEX_URL!
+);
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // 1. إعدادات الهيدرز و CORS
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, POST');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization'
-  );
-
-  // التعامل مع طلبات Preflight (OPTIONS)
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  // رفض أي طلب ليس POST
+  // قبول طلبات POST فقط
   if (req.method !== 'POST') {
-    return res.status(405).json({
-      success: false,
-      error: 'Method Not Allowed',
-      message: 'Only POST requests are accepted.'
-    });
+    return res.status(405).json({ success: false, message: 'Method Not Allowed' });
   }
 
   try {
-    // 2. اختيارية: التحقق من مفتاح الأمان (Security Auth Check)
-    // يمكنك إضافة WEBHOOK_SECRET في Vercel Environment Variables
-    const webhookSecret = process.env.WEBHOOK_SECRET;
-    const authHeader = req.headers['authorization'] || req.headers['x-api-key'];
-
-    if (webhookSecret && authHeader !== webhookSecret) {
-      console.warn("⚠️ Unauthorized webhook attempt detected.");
-      return res.status(401).json({
-        success: false,
-        error: 'Unauthorized',
-        message: 'Invalid or missing security token.'
-      });
-    }
-
     const body = req.body || {};
 
-    // 3. استخراج واستخراج بيانات الرسالة الذكي (حسب نوع تطبيق الموبايل)
-    const sender = body.from || body.sender || body.address || 'Unknown Sender';
-    const message = body.message || body.text || body.body || body.content || '';
-    const receivedAt = body.timestamp || new Date().toISOString();
+    // استخراج بيانات الرسالة والموبايل
+    const sender = body.sender || body.from || 'VF-Cash';
+    const message = body.message || body.text || body.content || '';
+    const phone = body.phone || body.sim || '01009149586';
 
-    // 4. طباعة منظمة في Vercel Logs
-    console.log("==========================================");
-    console.log(`📨 NEW SMS RECEIVED | ${new Date().toLocaleString()}`);
-    console.log(`👤 From: ${sender}`);
-    console.log(`💬 Message: ${message}`);
-    console.log("📦 Full Payload:", JSON.stringify(body, null, 2));
-    console.log("==========================================");
+    if (!message) {
+      return res.status(400).json({ success: false, message: 'محتوى الرسالة مطلوب' });
+    }
 
-    // -------------------------------------------------------------
-    // 💡 نقطة الربط القادمة (Database / Convex Integration):
-    // await saveSmsToDatabase({ sender, message, receivedAt, raw: body });
-    // -------------------------------------------------------------
+    // استدعاء Mutation للـ Convex لتفكيك الرسالة وتسجيل العملية وتحديث الرصيد
+    const result = await convex.mutation(api.webhook.parseAndProcessSms, {
+      sender,
+      phone,
+      body: message,
+    });
 
-    // 5. الرد بالنجاح على تطبيق الموبايل
     return res.status(200).json({
       success: true,
-      message: 'SMS processed and logged successfully!',
-      processedData: {
-        sender,
-        message,
-        receivedAt
-      },
-      receivedAt: new Date().toISOString()
+      message: 'تم استقبال الرسالة وتحديث البيانات بنجاح!',
+      data: result,
     });
 
   } catch (error: any) {
-    console.error("❌ Error processing incoming SMS:", error);
-
+    console.error('Webhook Error:', error);
     return res.status(500).json({
       success: false,
-      error: 'Internal Server Error',
-      message: error?.message || 'An unexpected error occurred while processing the request.'
+      message: 'حدث خطأ أثناء معالجة الرسالة',
+      error: error.message || error,
     });
   }
 }

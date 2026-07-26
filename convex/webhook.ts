@@ -8,7 +8,8 @@ export const parseAndProcessSms = mutation({
     phone: v.string(),  // رقم الخط المستلم في المحل
   },
   handler: async (ctx, args) => {
-    const { body, phone } = args;
+    const { body, phone, sender } = args;
+    const now = Date.now();
 
     // 1. Regex للبحث عن تفاصيل الإيداع في رسالة فودافون كاش
     const depositRegex = /تم استلام مبلغ (\d+(?:\.\d+)?) ج\.م من رقم (\d+)\. رصيدك الحالي هو (\d+(?:\.\d+)?) ج\.م\. رقم العملية (\d+)/;
@@ -37,21 +38,36 @@ export const parseAndProcessSms = mutation({
       newBalance = parseFloat(match[3]);
       transactionId = match[4];
     } else {
+      // حفظ الرسالة غير المعالجة في smsLogs للأمان والربط لاحقاً
+      await ctx.db.insert("smsLogs", {
+        from: sender,
+        message: body,
+        parsed: false,
+        createdAt: now,
+      });
       return { success: false, message: "صيغة الرسالة غير معتمدة" };
     }
 
-    // 3. البحث عن المحفظة المطابقة لـ phone المستلم
+    // 3. البحث السريع عن المحفظة باستخدام الـ Index المخصص (by_phone)
     const wallet = await ctx.db
       .query("wallets")
-      .filter((q) => q.eq(q.field("phoneNumber"), phone))
+      .withIndex("by_phone", (q) => q.eq("phoneNumber", phone))
       .first();
 
     if (!wallet) {
+      await ctx.db.insert("smsLogs", {
+        from: sender,
+        message: body,
+        parsed: false,
+        createdAt: now,
+      });
       return { success: false, message: "المحفظة غير مسجلة في النظام" };
     }
 
+    const isDeposit = type === "deposit";
+
     // 4. تسجيل الحركة في جدول الحركات
-    await ctx.db.insert("transactions", {
+    const txId = await ctx.db.insert("transactions", {
       walletId: wallet._id,
       type: type,
       amount: amount,
@@ -59,17 +75,69 @@ export const parseAndProcessSms = mutation({
       balanceAfter: newBalance,
       status: "completed",
       source: "sms",
-      description: `عملية ${type === "deposit" ? "إيداع" : "سحب"} من/إلى رقم ${counterparty}`,
+      description: `عملية ${isDeposit ? "إيداع" : "سحب"} من/إلى رقم ${counterparty}`,
       reference: transactionId,
-      createdAt: Date.now(),
+      createdAt: now,
     });
 
-    // 5. تحديث رصيد المحفظة فوراً
+    // 5. تحديث رصيد المحفظة والاستهلاك اليومي/الشهري والإجماليات
     await ctx.db.patch(wallet._id, {
       balance: newBalance,
-      lastUpdated: Date.now(),
+      dailyUsed: wallet.dailyUsed + amount,
+      monthlyUsed: wallet.monthlyUsed + amount,
+      totalDeposits: isDeposit ? wallet.totalDeposits + amount : wallet.totalDeposits,
+      totalWithdrawals: !isDeposit ? wallet.totalWithdrawals + amount : wallet.totalWithdrawals,
+      lastSyncAt: now,
+      lastSyncStatus: "connected",
+      lastUpdated: now,
     });
 
-    return { success: true, message: "تم تسجيل الحركة وتحديث الرصيد بنجاح!" };
+    // 6. تسجيل العملية في smsLogs للتوثيق
+    await ctx.db.insert("smsLogs", {
+      from: sender,
+      message: body,
+      parsed: true,
+      walletId: wallet._id,
+      parsedData: {
+        type: type,
+        amount: amount,
+        balance: newBalance,
+        reference: transactionId,
+      },
+      createdAt: now,
+    });
+
+    // 7. تحديث إحصائيات اليوم (dailyStats)
+    const todayStr = new Date(now).toISOString().split("T")[0]; // YYYY-MM-DD
+    const existingStat = await ctx.db
+      .query("dailyStats")
+      .withIndex("by_wallet_and_date", (q) => q.eq("walletId", wallet._id).eq("date", todayStr))
+      .first();
+
+    if (existingStat) {
+      await ctx.db.patch(existingStat._id, {
+        totalDeposits: isDeposit ? existingStat.totalDeposits + amount : existingStat.totalDeposits,
+        totalWithdrawals: !isDeposit ? existingStat.totalWithdrawals + amount : existingStat.totalWithdrawals,
+        depositCount: isDeposit ? existingStat.depositCount + 1 : existingStat.depositCount,
+        withdrawalCount: !isDeposit ? existingStat.withdrawalCount + 1 : existingStat.withdrawalCount,
+      });
+    } else {
+      await ctx.db.insert("dailyStats", {
+        walletId: wallet._id,
+        date: todayStr,
+        totalDeposits: isDeposit ? amount : 0,
+        totalWithdrawals: !isDeposit ? amount : 0,
+        depositCount: isDeposit ? 1 : 0,
+        withdrawalCount: !isDeposit ? 1 : 0,
+        netProfit: 0,
+        createdAt: now,
+      });
+    }
+
+    return { 
+      success: true, 
+      message: "تم تسجيل الحركة وتحديث الرصيد والحدود بنجاح!", 
+      transactionId: txId 
+    };
   },
 });
